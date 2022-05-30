@@ -16,6 +16,8 @@ shared_library(
         'dprintf.h',
         'dump.c',
         'dump.h',
+        'icmp.c',
+        'icmp.h',
         'ip4.c',
         'ip4.h',
     ],
