@@ -9,6 +9,8 @@ shared_library(
         capnhook.get_variable('iohook_dep'),
     ],
     sources : [
+        'checksum.c',
+        'checksum.h',
         'dllmain.c',
         'dprintf.c',
         'dprintf.h',
