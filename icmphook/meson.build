@@ -10,5 +10,7 @@ shared_library(
     ],
     sources : [
         'dllmain.c',
+        'dprintf.c',
+        'dprintf.h',
     ],
 )
