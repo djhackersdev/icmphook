@@ -12,5 +12,7 @@ shared_library(
         'dllmain.c',
         'dprintf.c',
         'dprintf.h',
+        'dump.c',
+        'dump.h',
     ],
 )
