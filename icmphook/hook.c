@@ -17,6 +17,7 @@
 #include "iohook/iohook.h"
 
 struct hook_socket {
+    struct hook_socket *next;
     HANDLE fd;
     uint32_t tx_timeout_ms;
     uint32_t rx_timeout_ms;
@@ -46,7 +47,6 @@ static HRESULT hook_handle_sendto(struct irp *irp, struct hook_socket *sock);
 
 static CRITICAL_SECTION hook_lock;
 static struct hook_socket *hook_sockets;
-static size_t hook_nsockets;
 static uint8_t hook_tmp_bytes[0xffff];
 
 HRESULT hook_init(void)
@@ -58,11 +58,11 @@ HRESULT hook_init(void)
 
 static struct hook_socket *hook_find_socket(HANDLE fd)
 {
-    size_t i;
+    struct hook_socket *sock;
 
-    for (i = 0 ; i < hook_nsockets ; i++) {
-        if (hook_sockets[i].fd == fd) {
-            return &hook_sockets[i];
+    for (sock = hook_sockets ; sock != NULL ; sock = sock->next) {
+        if (sock->fd == fd) {
+            return sock;
         }
     }
 
@@ -73,13 +73,10 @@ static void hook_distribute_response(const void *bytes, size_t nbytes)
 {
     struct iobuf tmp_iobuf;
     struct hook_socket *sock;
-    size_t i;
 
     assert(bytes != NULL);
 
-    for (i = 0 ; i < hook_nsockets ; i++) {
-        sock = &hook_sockets[i];
-
+    for (sock = hook_sockets ; sock != NULL ; sock = sock->next) {
         if (sock->recv.pos == 0) {
             tmp_iobuf.bytes = sock->bytes;
             tmp_iobuf.nbytes = sizeof(sock->bytes);
@@ -151,8 +148,6 @@ static HRESULT hook_handle_irp_locked(
 static HRESULT hook_handle_socket(struct irp *irp)
 {
     struct hook_socket *sock;
-    struct hook_socket *new_sockets;
-    size_t new_nsockets;
     HRESULT hr;
 
     assert(irp != NULL);
@@ -166,21 +161,13 @@ static HRESULT hook_handle_socket(struct irp *irp)
         return E_NOTIMPL;
     }
 
-    new_nsockets = hook_nsockets + 1;
-    new_sockets = malloc(sizeof(struct hook_socket) * new_nsockets);
+    sock = calloc(1, sizeof(*sock));
 
-    if (new_sockets == NULL) {
+    if (sock == NULL) {
         hr = E_OUTOFMEMORY;
 
         goto end;
     }
-
-    memcpy( new_sockets,
-            hook_sockets,
-            sizeof(struct hook_socket) * hook_nsockets);
-
-    sock = &new_sockets[hook_nsockets];
-    memset(sock, 0, sizeof(*sock));
 
     hr = iohook_open_nul_fd(&sock->fd);
 
@@ -188,20 +175,18 @@ static HRESULT hook_handle_socket(struct irp *irp)
         goto end;
     }
 
-    free(hook_sockets);
-
-    hook_sockets = new_sockets;
-    hook_nsockets = new_nsockets;
-    new_sockets = NULL;
-
     irp->fd = sock->fd;
 
     dprintf("%s -> %p\n", __func__, sock->fd);
 
+    sock->next = hook_sockets;
+    hook_sockets = sock;
+    sock = NULL;
+
     hr = S_OK;
 
 end:
-    free(new_sockets);
+    free(sock);
 
     return hr;
 }
@@ -210,22 +195,25 @@ static HRESULT hook_handle_closesocket(
         struct irp *irp,
         struct hook_socket *sock)
 {
+    struct hook_socket *prev;
     HRESULT hr;
-    size_t off;
-    size_t len;
 
     assert(irp != NULL);
     assert(sock != NULL);
-    assert(sock >= hook_sockets && sock < hook_sockets + hook_nsockets);
 
-    off = sock - hook_sockets;
-    len = hook_nsockets - off - 1;
+    if (hook_sockets == sock) {
+        hook_sockets = sock->next;
+    } else {
+        for (prev = hook_sockets ; prev != NULL ; prev = prev->next) {
+            if (prev->next == sock) {
+                prev->next = sock->next;
 
-    memmove(&hook_sockets[off],
-            &hook_sockets[off + 1],
-            len * sizeof(struct hook_socket));
+                break;
+            }
+        }
+    }
 
-    hook_nsockets--;
+    free(sock);
 
     /* Close our straw FD, releasing the lock as we do so (we'll need to
        reacquire the lock so that the common dispatch code can unlock it). */
