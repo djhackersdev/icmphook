@@ -19,6 +19,7 @@
 struct hook_socket {
     struct hook_socket *next;
     HANDLE fd;
+    CONDITION_VARIABLE cond;
     uint32_t tx_timeout_ms;
     uint32_t rx_timeout_ms;
     struct const_iobuf recv;
@@ -84,6 +85,8 @@ static void hook_distribute_response(const void *bytes, size_t nbytes)
 
             iobuf_write(&tmp_iobuf, bytes, nbytes);
             iobuf_flip(&sock->recv, &tmp_iobuf);
+
+            WakeAllConditionVariable(&sock->cond);
         } else {
             dprintf("%s: %p: RX buffer overflow\n", __func__, sock->fd);
         }
@@ -174,6 +177,10 @@ static HRESULT hook_handle_socket(struct irp *irp)
     if (FAILED(hr)) {
         goto end;
     }
+
+    InitializeConditionVariable(&sock->cond);
+    sock->rx_timeout_ms = INFINITE;
+    sock->tx_timeout_ms = INFINITE;
 
     irp->fd = sock->fd;
 
@@ -379,7 +386,7 @@ static HRESULT hook_handle_sendto(struct irp *irp, struct hook_socket *sock)
     addr = _byteswap_ulong(addr_obj->sin_addr.s_addr);
 
 #if 1
-    dprintf("sendto(%08x):\n", addr);
+    dprintf("sendto(%p, %08x):\n", irp->fd, addr);
     dump_const_iobuf(&irp->write);
 #endif
 
@@ -407,11 +414,10 @@ static HRESULT hook_handle_recvfrom(
 {
     struct sockaddr_in *addr_obj;
     size_t ncopied;
+    BOOL ok;
 
     assert(irp != NULL);
     assert(sock != NULL);
-
-    dprintf("%s(%p)\n", __func__, irp->fd);
 
     if (irp->addr_in != NULL) {
         assert(irp->addr_in_len != NULL);
@@ -433,12 +439,18 @@ static HRESULT hook_handle_recvfrom(
     ncopied = iobuf_move(&irp->read, &sock->recv);
 
     if (ncopied == 0) {
-        dprintf("%s: No packet, sleeping %ims\n",
-                __func__,
+        ok = SleepConditionVariableCS(
+                &sock->cond,
+                &hook_lock,
                 sock->rx_timeout_ms);
-        Sleep(sock->rx_timeout_ms);
 
-        return HRESULT_FROM_WIN32(WSAETIMEDOUT);
+        if (!ok) {
+            dprintf("recvfrom(%p) -> Timed out\n", irp->fd);
+
+            return HRESULT_FROM_WIN32(WSAETIMEDOUT);
+        }
+
+        iobuf_move(&irp->read, &sock->recv);
     }
 
     if (addr_obj != NULL) {
@@ -447,7 +459,10 @@ static HRESULT hook_handle_recvfrom(
         addr_obj->sin_addr.s_addr = _byteswap_ulong(0x7f000001);
     }
 
+#if 1
+    dprintf("recvfrom(%p)\n", irp->fd);
     dump_iobuf(&irp->read);
+#endif
 
     return S_OK;
 }
