@@ -20,8 +20,6 @@ shared_library(
         'hook.h',
         'icmp.c',
         'icmp.h',
-        'ip4.c',
-        'ip4.h',
         'peer.c',
         'peer.h',
     ],
