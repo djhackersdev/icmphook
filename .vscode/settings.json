@@ -1,0 +1,7 @@
+{
+    "editor.detectIndentation": false,
+    "files.associations": {
+        "windows.h": "c"
+    },
+    "mesonbuild.configureOnOpen": true
+}
