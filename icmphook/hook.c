@@ -17,14 +17,19 @@
 #include "iohook/iobuf.h"
 #include "iohook/iohook.h"
 
+struct hook_packet {
+    struct list_node head;
+    struct const_iobuf recv;
+    uint8_t bytes[0];
+};
+
 struct hook_socket {
     struct list_node head;
+    struct list packets;
     HANDLE fd;
     CONDITION_VARIABLE cond;
     uint32_t tx_timeout_ms;
     uint32_t rx_timeout_ms;
-    struct const_iobuf recv;
-    uint8_t bytes[0xffff];
 };
 
 static struct hook_socket *hook_find_socket(HANDLE fd);
@@ -44,8 +49,11 @@ static HRESULT hook_handle_ioctlsocket(
 static HRESULT hook_handle_setsockopt(
         struct irp *irp,
         struct hook_socket *sock);
-static HRESULT hook_handle_recvfrom(struct irp *irp, struct hook_socket *sock);
 static HRESULT hook_handle_sendto(struct irp *irp, struct hook_socket *sock);
+static HRESULT hook_handle_recvfrom(struct irp *irp, struct hook_socket *sock);
+static HRESULT hook_handle_recvfrom_inner(
+        struct hook_socket *sock,
+        struct iobuf *recv);
 
 static CRITICAL_SECTION hook_lock;
 static struct list hook_sockets;
@@ -78,24 +86,25 @@ static void hook_distribute_response(const void *bytes, size_t nbytes)
 {
     struct list_node *pos;
     struct hook_socket *sock;
-    struct iobuf tmp_iobuf;
+    struct hook_packet *pkt;
 
     assert(bytes != NULL);
 
     for (pos = hook_sockets.head ; pos != NULL ; pos = pos->next) {
         sock = CONTAINING_RECORD(pos, struct hook_socket, head);
+        pkt = malloc(sizeof(*pkt) + nbytes);
 
-        if (sock->recv.pos == 0) {
-            tmp_iobuf.bytes = sock->bytes;
-            tmp_iobuf.nbytes = sizeof(sock->bytes);
-            tmp_iobuf.pos = 0;
+        if (pkt != NULL) {
+            pkt->head.next = NULL;
+            pkt->recv.bytes = pkt->bytes;
+            pkt->recv.nbytes = nbytes;
+            pkt->recv.pos = 0;
 
-            iobuf_write(&tmp_iobuf, bytes, nbytes);
-            iobuf_flip(&sock->recv, &tmp_iobuf);
-
+            memcpy(pkt->bytes, bytes, nbytes);
+            list_append(&sock->packets, &pkt->head);
             WakeAllConditionVariable(&sock->cond);
         } else {
-            dprintf("%s: %p: RX buffer overflow\n", __func__, sock->fd);
+            dprintf("%s: Out of memory...\n", __func__);
         }
     }
 }
@@ -417,8 +426,7 @@ static HRESULT hook_handle_recvfrom(
         struct hook_socket *sock)
 {
     struct sockaddr_in *addr_obj;
-    size_t ncopied;
-    BOOL ok;
+    HRESULT hr;
 
     assert(irp != NULL);
     assert(sock != NULL);
@@ -440,21 +448,10 @@ static HRESULT hook_handle_recvfrom(
         addr_obj = NULL;
     }
 
-    ncopied = iobuf_move(&irp->read, &sock->recv);
+    hr = hook_handle_recvfrom_inner(sock, &irp->read);
 
-    if (ncopied == 0) {
-        ok = SleepConditionVariableCS(
-                &sock->cond,
-                &hook_lock,
-                sock->rx_timeout_ms);
-
-        if (!ok) {
-            dprintf("recvfrom(%p) -> Timed out\n", irp->fd);
-
-            return HRESULT_FROM_WIN32(WSAETIMEDOUT);
-        }
-
-        iobuf_move(&irp->read, &sock->recv);
+    if (FAILED(hr)) {
+        return hr;
     }
 
     if (addr_obj != NULL) {
@@ -467,6 +464,48 @@ static HRESULT hook_handle_recvfrom(
     dprintf("recvfrom(%p)\n", irp->fd);
     dump_iobuf(&irp->read);
 #endif
+
+    return S_OK;
+}
+
+static HRESULT hook_handle_recvfrom_inner(
+        struct hook_socket *sock,
+        struct iobuf *recv)
+{
+    struct list_node *head;
+    struct hook_packet *pkt;
+    uint32_t deadline;
+    uint32_t timeout;
+    uint32_t now;
+    BOOL ok;
+
+    assert(sock != NULL);
+    assert(recv != NULL);
+
+    deadline = GetTickCount() + sock->rx_timeout_ms;
+    head = list_pop_head(&sock->packets);
+
+    while (head == NULL) {
+        now = GetTickCount();
+
+        if (deadline > now) {
+            timeout = deadline - now;
+        } else {
+            timeout = 0;
+        }
+
+        ok = SleepConditionVariableCS(&sock->cond, &hook_lock, timeout);
+
+        if (!ok) {
+            dprintf("recvfrom(%p) -> Timed out\n", sock->fd);
+
+            return HRESULT_FROM_WIN32(WSAETIMEDOUT);
+        }
+    }
+
+    pkt = CONTAINING_RECORD(head, struct hook_packet, head);
+    iobuf_move(recv, &pkt->recv);
+    free(pkt);
 
     return S_OK;
 }
