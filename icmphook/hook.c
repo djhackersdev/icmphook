@@ -11,13 +11,14 @@
 #include "icmphook/dump.h"
 #include "icmphook/hook.h"
 #include "icmphook/icmp.h"
+#include "icmphook/list.h"
 #include "icmphook/peer.h"
 
 #include "iohook/iobuf.h"
 #include "iohook/iohook.h"
 
 struct hook_socket {
-    struct hook_socket *next;
+    struct list_node head;
     HANDLE fd;
     CONDITION_VARIABLE cond;
     uint32_t tx_timeout_ms;
@@ -47,7 +48,7 @@ static HRESULT hook_handle_recvfrom(struct irp *irp, struct hook_socket *sock);
 static HRESULT hook_handle_sendto(struct irp *irp, struct hook_socket *sock);
 
 static CRITICAL_SECTION hook_lock;
-static struct hook_socket *hook_sockets;
+static struct list hook_sockets;
 static uint8_t hook_tmp_bytes[0xffff];
 
 HRESULT hook_init(void)
@@ -59,9 +60,12 @@ HRESULT hook_init(void)
 
 static struct hook_socket *hook_find_socket(HANDLE fd)
 {
+    struct list_node *pos;
     struct hook_socket *sock;
 
-    for (sock = hook_sockets ; sock != NULL ; sock = sock->next) {
+    for (pos = hook_sockets.head ; pos != NULL ; pos = pos->next) {
+        sock = CONTAINING_RECORD(pos, struct hook_socket, head);
+
         if (sock->fd == fd) {
             return sock;
         }
@@ -72,12 +76,15 @@ static struct hook_socket *hook_find_socket(HANDLE fd)
 
 static void hook_distribute_response(const void *bytes, size_t nbytes)
 {
-    struct iobuf tmp_iobuf;
+    struct list_node *pos;
     struct hook_socket *sock;
+    struct iobuf tmp_iobuf;
 
     assert(bytes != NULL);
 
-    for (sock = hook_sockets ; sock != NULL ; sock = sock->next) {
+    for (pos = hook_sockets.head ; pos != NULL ; pos = pos->next) {
+        sock = CONTAINING_RECORD(pos, struct hook_socket, head);
+
         if (sock->recv.pos == 0) {
             tmp_iobuf.bytes = sock->bytes;
             tmp_iobuf.nbytes = sizeof(sock->bytes);
@@ -186,8 +193,7 @@ static HRESULT hook_handle_socket(struct irp *irp)
 
     dprintf("%s -> %p\n", __func__, sock->fd);
 
-    sock->next = hook_sockets;
-    hook_sockets = sock;
+    list_append(&hook_sockets, &sock->head);
     sock = NULL;
 
     hr = S_OK;
@@ -202,21 +208,19 @@ static HRESULT hook_handle_closesocket(
         struct irp *irp,
         struct hook_socket *sock)
 {
-    struct hook_socket *prev;
+    struct list_node *pos;
+    struct list_node *prev;
+
     HRESULT hr;
 
     assert(irp != NULL);
     assert(sock != NULL);
 
-    if (hook_sockets == sock) {
-        hook_sockets = sock->next;
-    } else {
-        for (prev = hook_sockets ; prev != NULL ; prev = prev->next) {
-            if (prev->next == sock) {
-                prev->next = sock->next;
-
-                break;
-            }
+    for (   pos = hook_sockets.head, prev = NULL ;
+            pos != NULL ;
+            prev = pos, pos = pos->next) {
+        if (pos == &sock->head) {
+            list_unlink(&hook_sockets, pos, prev);
         }
     }
 
