@@ -10,7 +10,7 @@
 #include "icmphook/dprintf.h"
 #include "icmphook/dump.h"
 #include "icmphook/hook.h"
-#include "icmphook/icmp.h"
+#include "icmphook/ip4.h"
 #include "icmphook/list.h"
 #include "icmphook/peer.h"
 
@@ -53,7 +53,8 @@ static HRESULT hook_handle_sendto(struct irp *irp, struct hook_socket *sock);
 static HRESULT hook_handle_recvfrom(struct irp *irp, struct hook_socket *sock);
 static HRESULT hook_handle_recvfrom_inner(
         struct hook_socket *sock,
-        struct iobuf *recv);
+        struct iobuf *recv,
+        struct sockaddr_in *recv_addr);
 
 static CRITICAL_SECTION hook_lock;
 static struct list hook_sockets;
@@ -448,16 +449,10 @@ static HRESULT hook_handle_recvfrom(
         addr_obj = NULL;
     }
 
-    hr = hook_handle_recvfrom_inner(sock, &irp->read);
+    hr = hook_handle_recvfrom_inner(sock, &irp->read, addr_obj);
 
     if (FAILED(hr)) {
         return hr;
-    }
-
-    if (addr_obj != NULL) {
-        addr_obj->sin_family = AF_INET;
-        addr_obj->sin_port = 0;
-        addr_obj->sin_addr.s_addr = _byteswap_ulong(0x7f000001);
     }
 
 #if 1
@@ -470,13 +465,16 @@ static HRESULT hook_handle_recvfrom(
 
 static HRESULT hook_handle_recvfrom_inner(
         struct hook_socket *sock,
-        struct iobuf *recv)
+        struct iobuf *recv,
+        struct sockaddr_in *recv_addr)
 {
     struct list_node *head;
     struct hook_packet *pkt;
+    struct ip4_header ip4;
     uint32_t deadline;
     uint32_t timeout;
     uint32_t now;
+    HRESULT hr;
     BOOL ok;
 
     assert(sock != NULL);
@@ -504,8 +502,28 @@ static HRESULT hook_handle_recvfrom_inner(
     }
 
     pkt = CONTAINING_RECORD(head, struct hook_packet, head);
-    iobuf_move(recv, &pkt->recv);
+
+    memset(&ip4, 0, sizeof(ip4));
+    ip4.ttl = 1;
+    ip4.protocol = IPPROTO_ICMP;
+    ip4.src = 0x7f000001;
+    ip4.dest = 0x7f000001;
+
+    hr = ip4_encode(
+            recv,
+            &ip4,
+            NULL,
+            0,
+            &pkt->recv.bytes[pkt->recv.pos],
+            pkt->recv.nbytes - pkt->recv.pos);
+
+    if (recv_addr != NULL) {
+        recv_addr->sin_family = AF_INET;
+        recv_addr->sin_port = 0;
+        recv_addr->sin_addr.s_addr = _byteswap_ulong(0x7f000001);
+    }
+
     free(pkt);
 
-    return S_OK;
+    return hr;
 }
