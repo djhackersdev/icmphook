@@ -286,7 +286,7 @@ static HRESULT hook_handle_ioctlsocket(
     assert(irp != NULL);
     assert(sock != NULL);
 
-    dprintf("%s(%p, %x)\n", __func__, irp->fd, irp->sock_ioctl);
+    dprintf("%s(%p, %x)\n", __func__, irp->fd, (unsigned int) irp->sock_ioctl);
 
     switch (irp->sock_ioctl) {
     case FIONBIO:
